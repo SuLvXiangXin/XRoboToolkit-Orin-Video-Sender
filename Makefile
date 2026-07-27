@@ -100,4 +100,10 @@ install: $(APP)
 	@echo "Installing $(APP)..."
 	install -D $(APP) /usr/local/bin/$(APP)
 
-.PHONY: all debug clean install
+gateway-test:
+	python3 -m unittest discover -s tests -v
+
+gateway-dry-run:
+	@python3 -m vr_gateway --source synthetic --encoder auto --dry-run
+
+.PHONY: all debug clean install gateway-test gateway-dry-run
