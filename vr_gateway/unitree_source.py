@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from enum import Enum
 import os
 from pathlib import Path
 import threading
@@ -11,6 +10,7 @@ from typing import Any, Callable
 
 from .config import SourceConfig
 from .metrics import Metrics
+from .raw_source import LatestRawFrameQueue, RawPutResult, RawVideoFrame
 
 
 class UnitreeDependencyError(RuntimeError):
@@ -23,69 +23,6 @@ class UnitreeFrameTimeoutError(TimeoutError):
 
 class UnitreeTrackEndedError(ConnectionError):
     pass
-
-
-@dataclass(frozen=True)
-class RawVideoFrame:
-    data: bytes
-    width: int
-    height: int
-    captured_monotonic_ns: int
-
-
-class RawPutResult(str, Enum):
-    ENQUEUED = "enqueued"
-    OVERWROTE = "overwrote"
-    CLOSED = "closed"
-
-
-class LatestRawFrameQueue:
-    """One-frame handoff. Producers never wait for the encoder consumer."""
-
-    def __init__(self) -> None:
-        self._condition = threading.Condition()
-        self._frame: RawVideoFrame | None = None
-        self._closed = False
-        self._overwrites = 0
-
-    def put(self, frame: RawVideoFrame) -> RawPutResult:
-        with self._condition:
-            if self._closed:
-                return RawPutResult.CLOSED
-            overwritten = self._frame is not None
-            if overwritten:
-                self._overwrites += 1
-            self._frame = frame
-            self._condition.notify()
-            return RawPutResult.OVERWROTE if overwritten else RawPutResult.ENQUEUED
-
-    def get(self, timeout_s: float) -> RawVideoFrame | None:
-        deadline = time.monotonic() + max(0.0, timeout_s)
-        with self._condition:
-            while self._frame is None and not self._closed:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
-                    return None
-                self._condition.wait(remaining)
-            frame, self._frame = self._frame, None
-            return frame
-
-    def clear(self) -> None:
-        with self._condition:
-            self._frame = None
-
-    def close(self) -> None:
-        with self._condition:
-            self._closed = True
-            self._frame = None
-            self._condition.notify_all()
-
-    def snapshot(self) -> dict[str, int | bool]:
-        with self._condition:
-            return {
-                "unitree_raw_frame_pending": self._frame is not None,
-                "unitree_raw_frames_overwritten": self._overwrites,
-            }
 
 
 @dataclass(frozen=True)

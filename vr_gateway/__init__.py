@@ -6,5 +6,6 @@ official Unity camera-control protocol and the encoded-video TCP stream.
 """
 
 from .config import GatewayConfig
+from .raw_source import LatestRawFrameQueue, RawFrameSource, RawVideoFrame
 
-__all__ = ["GatewayConfig"]
+__all__ = ["GatewayConfig", "LatestRawFrameQueue", "RawFrameSource", "RawVideoFrame"]

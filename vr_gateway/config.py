@@ -12,6 +12,7 @@ class SourceKind(str, Enum):
     SYNTHETIC = "synthetic"
     FILE = "file"
     UVC = "uvc"
+    RAW_APP_SRC = "raw-appsrc"
     UNITREE_WEBRTC = "unitree-webrtc"
 
 
@@ -42,6 +43,7 @@ class SourceConfig:
     unitree_frame_timeout_s: float = 3.0
     unitree_reconnect_delay_s: float = 1.0
     unitree_stop_timeout_s: float = 8.0
+    raw_frame_timeout_s: float = 3.0
 
     def validate(self) -> None:
         if self.kind == SourceKind.FILE:
@@ -75,6 +77,8 @@ class SourceConfig:
             )
             if min(timeouts) <= 0.0:
                 raise ValueError("Unitree WebRTC timeouts must be positive")
+        elif self.kind == SourceKind.RAW_APP_SRC and self.raw_frame_timeout_s <= 0.0:
+            raise ValueError("raw appsrc frame timeout must be positive")
 
 
 @dataclass

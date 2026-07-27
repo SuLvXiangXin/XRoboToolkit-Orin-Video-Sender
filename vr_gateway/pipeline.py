@@ -10,7 +10,7 @@ from .config import EncoderKind, SourceConfig, SourceKind, StreamConfig
 from .h264 import ParameterSetCache, annexb_nal_types
 from .metrics import Metrics
 from .queueing import AccessUnit, AccessUnitQueue, PutResult
-from .unitree_source import LatestRawFrameQueue
+from .raw_source import LatestRawFrameQueue
 
 
 _ENCODER_FACTORIES = {
@@ -144,15 +144,16 @@ class GstCapturePipeline:
         sink = pipeline.get_by_name("encoded_sink")
         probe = pipeline.get_by_name("capture_probe")
         encoder_input_probe = pipeline.get_by_name("encoder_input_probe")
-        appsrc = pipeline.get_by_name("unitree_appsrc")
+        appsrc_name = "unitree_appsrc" if self.source.kind == SourceKind.UNITREE_WEBRTC else "raw_appsrc"
+        appsrc = pipeline.get_by_name(appsrc_name)
         if encoder_element is None or sink is None or probe is None or encoder_input_probe is None:
             pipeline.set_state(Gst.State.NULL)
             raise RuntimeError("GStreamer pipeline is missing named gateway elements")
-        if self.source.kind == SourceKind.UNITREE_WEBRTC and (
+        if self.source.kind in (SourceKind.UNITREE_WEBRTC, SourceKind.RAW_APP_SRC) and (
             appsrc is None or self.raw_frame_source is None
         ):
             pipeline.set_state(Gst.State.NULL)
-            raise RuntimeError("unitree-webrtc pipeline requires its raw appsrc frame source")
+            raise RuntimeError("raw-appsrc pipeline requires a raw frame source")
 
         self._configure_encoder(encoder_element)
         sink.connect("new-sample", self._on_new_sample)
@@ -168,7 +169,7 @@ class GstCapturePipeline:
         if appsrc is not None:
             self._appsrc_thread = threading.Thread(
                 target=self._appsrc_loop,
-                name="unitree-appsrc",
+                name=f"{self.source.kind.value}-appsrc",
                 daemon=True,
             )
             self._appsrc_thread.start()
@@ -231,20 +232,25 @@ class GstCapturePipeline:
         appsrc = self._appsrc
         assert source is not None and appsrc is not None
         expected_size = self.stream.width * self.stream.height * 3
-        max_age_ns = int(self.source.unitree_frame_timeout_s * 1e9)
+        unitree_source = self.source.kind == SourceKind.UNITREE_WEBRTC
+        max_age_ns = int(
+            (self.source.unitree_frame_timeout_s if unitree_source else self.source.raw_frame_timeout_s)
+            * 1e9
+        )
+        metric_prefix = "unitree_appsrc" if unitree_source else "raw_appsrc"
         while not self._stop.is_set():
             frame = source.get(timeout_s=0.05)
             if frame is None:
                 continue
             if frame.width != self.stream.width or frame.height != self.stream.height:
-                self.metrics.inc("unitree_appsrc_shape_errors")
+                self.metrics.inc(f"{metric_prefix}_shape_errors")
                 continue
             if len(frame.data) != expected_size:
-                self.metrics.inc("unitree_appsrc_size_errors")
+                self.metrics.inc(f"{metric_prefix}_size_errors")
                 continue
             now_ns = time.monotonic_ns()
             if now_ns - frame.captured_monotonic_ns > max_age_ns:
-                self.metrics.inc("unitree_appsrc_stale_drops")
+                self.metrics.inc(f"{metric_prefix}_stale_drops")
                 continue
             buffer = Gst.Buffer.new_allocate(None, len(frame.data), None)
             buffer.fill(0, frame.data)
@@ -254,12 +260,12 @@ class GstCapturePipeline:
             result = appsrc.emit("push-buffer", buffer)
             if result != Gst.FlowReturn.OK:
                 if not self._stop.is_set():
-                    self.metrics.inc("unitree_appsrc_push_errors")
+                    self.metrics.inc(f"{metric_prefix}_push_errors")
                 continue
-            self.metrics.inc("unitree_appsrc_frames_pushed")
-            self.metrics.set("last_unitree_appsrc_monotonic_ns", now_ns)
+            self.metrics.inc(f"{metric_prefix}_frames_pushed")
+            self.metrics.set(f"last_{metric_prefix}_monotonic_ns", now_ns)
             self.metrics.set(
-                "unitree_source_to_appsrc_ms",
+                f"{self.source.kind.value}_source_to_appsrc_ms",
                 max(0.0, (now_ns - frame.captured_monotonic_ns) * 1e-6),
             )
 
@@ -396,9 +402,10 @@ def _source_description(source: SourceConfig, stream: StreamConfig) -> str:
             f'uridecodebin uri="{uri}" caps="video/x-raw(ANY)" '
             "expose-all-streams=false"
         )
-    if source.kind == SourceKind.UNITREE_WEBRTC:
+    if source.kind in (SourceKind.UNITREE_WEBRTC, SourceKind.RAW_APP_SRC):
+        appsrc_name = "unitree_appsrc" if source.kind == SourceKind.UNITREE_WEBRTC else "raw_appsrc"
         return (
-            "appsrc name=unitree_appsrc is-live=true do-timestamp=true "
+            f"appsrc name={appsrc_name} is-live=true do-timestamp=true "
             "format=time block=false emit-signals=false max-buffers=1 "
             "max-bytes=0 max-time=0 leaky-type=downstream "
             f'caps="video/x-raw,format=RGB,width={stream.width},height={stream.height},'

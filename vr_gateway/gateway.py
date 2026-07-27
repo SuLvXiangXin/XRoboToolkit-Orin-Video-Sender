@@ -14,8 +14,9 @@ from .metrics import Metrics
 from .pipeline import GstCapturePipeline, available_gstreamer_features, encoder_candidates
 from .protocol import CameraRequest
 from .queueing import AccessUnitQueue
+from .raw_source import LatestRawFrameQueue, RawFrameSource
 from .transport import Destination, VideoTransport
-from .unitree_source import LatestRawFrameQueue, UnitreeWebRTCSource
+from .unitree_source import UnitreeWebRTCSource
 
 
 class VideoGateway:
@@ -57,23 +58,46 @@ class VideoGateway:
         self._stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
         self._metrics_thread: threading.Thread | None = None
-        self._unitree_frames: LatestRawFrameQueue | None = None
+        self._raw_frames: LatestRawFrameQueue | None = None
         self._unitree_source: UnitreeWebRTCSource | None = None
+        self._external_source: RawFrameSource | None = None
         if config.source.kind == SourceKind.UNITREE_WEBRTC:
-            self._unitree_frames = LatestRawFrameQueue()
+            self._raw_frames = LatestRawFrameQueue()
+        elif config.source.kind == SourceKind.RAW_APP_SRC:
+            self._raw_frames = LatestRawFrameQueue(metric_prefix="raw")
+        if config.source.kind == SourceKind.UNITREE_WEBRTC:
             self._unitree_source = UnitreeWebRTCSource(
                 config.source,
-                self._unitree_frames,
+                self._raw_frames,
                 self.metrics,
                 width=config.stream.width,
                 height=config.stream.height,
             )
 
+    @property
+    def raw_frame_queue(self) -> LatestRawFrameQueue:
+        """Latest-frame handoff queue for raw appsrc sources."""
+        if self.config.source.kind != SourceKind.RAW_APP_SRC or self._raw_frames is None:
+            raise RuntimeError("raw_frame_queue requires source kind raw-appsrc")
+        return self._raw_frames
+
+    def attach_raw_source(self, source: RawFrameSource) -> None:
+        """Attach an external raw frame producer; requires the raw-appsrc source kind."""
+        if self.config.source.kind != SourceKind.RAW_APP_SRC:
+            raise RuntimeError("attach_raw_source requires source kind raw-appsrc")
+        if self._monitor_thread is not None:
+            raise RuntimeError("cannot replace a raw source while gateway is running")
+        self._external_source = source
+
     def start(self) -> None:
         self._stop.clear()
         try:
+            if self.config.source.kind == SourceKind.RAW_APP_SRC and self._external_source is None:
+                raise RuntimeError("raw-appsrc requires attach_raw_source() before start")
             if self._unitree_source is not None:
                 self._unitree_source.start()
+            if self._external_source is not None:
+                self._external_source.start()
             self.transport.start()
             self.heartbeat.start()
             self.health_server.start()
@@ -99,8 +123,10 @@ class VideoGateway:
         self.transport.stop()
         if self._unitree_source is not None:
             self._unitree_source.stop()
-        if self._unitree_frames is not None:
-            self._unitree_frames.close()
+        if self._external_source is not None:
+            self._external_source.stop()
+        if self._raw_frames is not None:
+            self._raw_frames.close()
         self.heartbeat.stop()
         self.health_server.stop()
         for thread_name in ("_monitor_thread", "_metrics_thread"):
@@ -113,7 +139,7 @@ class VideoGateway:
         stream = self.config.stream
         if (
             self.config.honor_open_camera_video_config
-            and self.config.source.kind != SourceKind.UNITREE_WEBRTC
+            and self.config.source.kind not in (SourceKind.UNITREE_WEBRTC, SourceKind.RAW_APP_SRC)
         ):
             stream = replace(
                 stream,
@@ -128,6 +154,11 @@ class VideoGateway:
             and self.config.source.kind == SourceKind.UNITREE_WEBRTC
         ):
             self.metrics.inc("unitree_open_camera_video_config_ignored")
+        elif (
+            self.config.honor_open_camera_video_config
+            and self.config.source.kind == SourceKind.RAW_APP_SRC
+        ):
+            self.metrics.inc("raw_appsrc_open_camera_video_config_ignored")
         if request.enable_mv_hevc:
             self.metrics.inc("hevc_requests_ignored")
             self.metrics.set("last_warning", "HEVC requested; gateway currently sends H.264")
@@ -171,8 +202,8 @@ class VideoGateway:
 
     def health_snapshot(self) -> dict[str, Any]:
         queue = self.queue.snapshot()
-        if self._unitree_frames is not None:
-            queue.update(self._unitree_frames.snapshot())
+        if self._raw_frames is not None:
+            queue.update(self._raw_frames.snapshot())
         receiver = self.receiver_health.snapshot()
         snapshot = self.metrics.snapshot({**queue, **receiver})
         now_ns = time.monotonic_ns()
@@ -181,6 +212,8 @@ class VideoGateway:
             ("last_send_monotonic_ns", "send_age_ms"),
             ("last_unitree_frame_monotonic_ns", "unitree_frame_age_ms"),
             ("last_unitree_appsrc_monotonic_ns", "unitree_appsrc_age_ms"),
+            ("last_raw_frame_monotonic_ns", "raw_frame_age_ms"),
+            ("last_raw_appsrc_monotonic_ns", "raw_appsrc_age_ms"),
         ):
             timestamp = snapshot.get(timestamp_name)
             snapshot[age_name] = (
@@ -196,6 +229,13 @@ class VideoGateway:
                 and snapshot.get("unitree_frame_age_ms") is not None
                 and float(snapshot["unitree_frame_age_ms"])
                 <= self.config.source.unitree_frame_timeout_s * 1000.0
+            )
+        elif self.config.source.kind == SourceKind.RAW_APP_SRC:
+            source_healthy = bool(
+                snapshot.get("raw_source_state") == "streaming"
+                and snapshot.get("raw_frame_age_ms") is not None
+                and float(snapshot["raw_frame_age_ms"])
+                <= self.config.source.raw_frame_timeout_s * 1000.0
             )
         snapshot["source_healthy"] = source_healthy
         snapshot["sender_healthy"] = bool(
@@ -227,7 +267,7 @@ class VideoGateway:
                 self.queue,
                 self.metrics,
                 error_callback=self._on_pipeline_error,
-                raw_frame_source=self._unitree_frames,
+                raw_frame_source=self._raw_frames,
             )
             try:
                 pipeline.start()
@@ -298,6 +338,8 @@ class VideoGateway:
                 ("video_bytes_sent", "video_bytes_per_s"),
                 ("unitree_frames_received", "unitree_receive_fps"),
                 ("unitree_appsrc_frames_pushed", "unitree_appsrc_fps"),
+                ("raw_frames_received", "raw_receive_fps"),
+                ("raw_appsrc_frames_pushed", "raw_appsrc_fps"),
             ):
                 value = int(current.get(counter, 0) or 0)
                 previous = last_values.get(counter, value)
