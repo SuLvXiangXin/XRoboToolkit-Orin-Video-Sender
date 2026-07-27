@@ -86,6 +86,19 @@ python3 -m vr_gateway \
   --listen 0.0.0.0:13579
 ```
 
+### External raw-frame source API
+
+`raw-appsrc` is the public input for an adapter that owns a non-GStreamer
+camera client, such as a ROS 2 subscription. It is a Python API rather than a
+standalone CLI source: configure `SourceKind.RAW_APP_SRC`, construct
+`VideoGateway`, attach an object with `start()`/`stop()`, and write complete RGB
+frames to `gateway.raw_frame_queue`. The queue keeps only one frame and its
+`put()` call never waits for encoding or network delivery.
+
+The reference ROS 2/Insight9 implementation is in the parent workspace at
+`scripts/stream_ros_camera_to_vr.py`. It uses only this public API; it does not
+pretend to be a Unitree source or access private gateway attributes.
+
 ## Optional Unitree WebRTC source (hardware pending)
 
 This adapter targets the known H2 LAN camera endpoint whose expected legacy

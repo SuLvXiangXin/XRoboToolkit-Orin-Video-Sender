@@ -78,6 +78,26 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("max-buffers=1", pipeline)
         self.assertIn("leaky-type=downstream", pipeline)
 
+    def test_raw_appsrc_is_unitree_independent_and_uses_a_named_public_input(self) -> None:
+        config = GatewayConfig()
+        config.source.kind = SourceKind.RAW_APP_SRC
+        config.source.raw_frame_timeout_s = 0.5
+        config.validate()
+
+        pipeline = build_pipeline_description(
+            config.stream,
+            config.source,
+            EncoderKind.X264,
+        )
+
+        self.assertIn("appsrc name=raw_appsrc", pipeline)
+        self.assertNotIn("unitree_appsrc", pipeline)
+        self.assertIn("block=false", pipeline)
+
+        config.source.raw_frame_timeout_s = 0.0
+        with self.assertRaisesRegex(ValueError, "raw appsrc"):
+            config.validate()
+
     def test_unitree_dry_run_never_prints_aes_key_from_environment(self) -> None:
         secret = "0123456789abcdef0123456789abcdef"
         environment = os.environ.copy()
