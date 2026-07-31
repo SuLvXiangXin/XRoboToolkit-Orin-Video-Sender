@@ -8,7 +8,7 @@ from typing import Callable, Protocol
 
 from .metrics import Metrics
 from .protocol import pack_video_access_unit
-from .queueing import AccessUnitQueue
+from .queueing import AccessUnit, AccessUnitQueue
 
 
 @dataclass(frozen=True)
@@ -75,6 +75,8 @@ class VideoTransport:
             self._generation += 1
             self._interrupt_socket_locked()
             self._condition.notify_all()
+        self.queue.require_recovery()
+        self.request_recovery()
 
     def clear_target(self) -> None:
         with self._condition:
@@ -103,6 +105,10 @@ class VideoTransport:
                 continue
             sock: SocketLike | None = None
             try:
+                self.metrics.set("video_waiting_for_recovery", True)
+                first_access_unit = self._wait_for_access_unit(generation)
+                if first_access_unit is None:
+                    continue
                 sock = self.connector(target, self.connect_timeout_s)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, self.send_buffer_bytes)
@@ -114,8 +120,8 @@ class VideoTransport:
                     self._active_socket = sock
                 self.metrics.inc("video_connects")
                 self.metrics.set("video_connected", True)
-                self.queue.require_recovery()
-                self.request_recovery()
+                self.metrics.set("video_waiting_for_recovery", False)
+                self._send_access_unit(sock, first_access_unit)
                 self._send_loop(sock, generation)
             except (OSError, TimeoutError) as exc:
                 self.metrics.inc("video_connect_or_send_errors")
@@ -127,6 +133,7 @@ class VideoTransport:
                 if sock is not None:
                     _close_socket(sock)
                 self.metrics.set("video_connected", False)
+                self.metrics.set("video_waiting_for_recovery", False)
                 self.queue.require_recovery()
                 self.request_recovery()
             if not self._stop.is_set() and self._is_generation_current(generation):
@@ -139,17 +146,29 @@ class VideoTransport:
                 if self.queue.consume_recovery_request():
                     self.request_recovery()
                 continue
-            started = time.monotonic()
-            sock.sendall(pack_video_access_unit(access_unit.payload))
-            self.metrics.inc("video_access_units_sent")
-            self.metrics.inc("video_bytes_sent", len(access_unit.payload))
-            self.metrics.set("video_last_send_ms", (time.monotonic() - started) * 1000.0)
-            sent_ns = time.monotonic_ns()
-            self.metrics.set("last_send_monotonic_ns", sent_ns)
-            self.metrics.set(
-                "capture_to_send_ms",
-                max(0.0, (sent_ns - access_unit.captured_monotonic_ns) * 1e-6),
-            )
+            self._send_access_unit(sock, access_unit)
+
+    def _wait_for_access_unit(self, generation: int) -> AccessUnit | None:
+        while not self._stop.is_set() and self._is_generation_current(generation):
+            access_unit = self.queue.get(timeout_s=0.1)
+            if access_unit is not None:
+                return access_unit
+            if self.queue.consume_recovery_request():
+                self.request_recovery()
+        return None
+
+    def _send_access_unit(self, sock: SocketLike, access_unit: AccessUnit) -> None:
+        started = time.monotonic()
+        sock.sendall(pack_video_access_unit(access_unit.payload))
+        self.metrics.inc("video_access_units_sent")
+        self.metrics.inc("video_bytes_sent", len(access_unit.payload))
+        self.metrics.set("video_last_send_ms", (time.monotonic() - started) * 1000.0)
+        sent_ns = time.monotonic_ns()
+        self.metrics.set("last_send_monotonic_ns", sent_ns)
+        self.metrics.set(
+            "capture_to_send_ms",
+            max(0.0, (sent_ns - access_unit.captured_monotonic_ns) * 1e-6),
+        )
 
     def _wait_for_target(self) -> tuple[Destination | None, int]:
         with self._condition:

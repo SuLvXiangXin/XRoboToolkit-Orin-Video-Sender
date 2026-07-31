@@ -45,7 +45,7 @@ class VideoGateway:
         self.control = ControlServer(
             config.control,
             on_open=self.open_from_unity,
-            on_close=self.close_stream,
+            on_close=self.close_from_unity,
             metrics=self.metrics,
         )
         self.heartbeat = HeartbeatListener(config.heartbeat, self.receiver_health, self.metrics)
@@ -61,6 +61,7 @@ class VideoGateway:
         self._raw_frames: LatestRawFrameQueue | None = None
         self._unitree_source: UnitreeWebRTCSource | None = None
         self._external_source: RawFrameSource | None = None
+        self._external_source_running = False
         if config.source.kind == SourceKind.UNITREE_WEBRTC:
             self._raw_frames = LatestRawFrameQueue()
         elif config.source.kind == SourceKind.RAW_APP_SRC:
@@ -96,8 +97,6 @@ class VideoGateway:
                 raise RuntimeError("raw-appsrc requires attach_raw_source() before start")
             if self._unitree_source is not None:
                 self._unitree_source.start()
-            if self._external_source is not None:
-                self._external_source.start()
             self.transport.start()
             self.heartbeat.start()
             self.health_server.start()
@@ -123,8 +122,6 @@ class VideoGateway:
         self.transport.stop()
         if self._unitree_source is not None:
             self._unitree_source.stop()
-        if self._external_source is not None:
-            self._external_source.stop()
         if self._raw_frames is not None:
             self._raw_frames.close()
         self.heartbeat.stop()
@@ -175,9 +172,11 @@ class VideoGateway:
                 self.transport.clear_target()
                 self._stop_pipeline_locked()
                 try:
+                    self._start_external_source_locked()
                     self._start_pipeline_locked(stream)
                 except Exception:
                     self._stop_pipeline_locked()
+                    self._stop_external_source_locked()
                     raise
             self._active_target = target
             self._active_stream = replace(stream)
@@ -192,7 +191,15 @@ class VideoGateway:
             self.receiver_health.reset()
             self.transport.clear_target()
             self._stop_pipeline_locked()
+            self._stop_external_source_locked()
             self.metrics.set("video_target", None)
+
+    def close_from_unity(self) -> None:
+        """Keep an explicitly configured direct target independent of legacy control."""
+        if self.config.direct_target is not None:
+            self.metrics.inc("close_camera_commands_ignored_direct_target")
+            return
+        self.close_stream()
 
     def request_keyframe(self) -> None:
         with self._lock:
@@ -290,6 +297,20 @@ class VideoGateway:
             pipeline.stop()
             self.metrics.inc("pipeline_stops")
         self.queue.require_recovery()
+
+    def _start_external_source_locked(self) -> None:
+        if self._external_source is None or self._external_source_running:
+            return
+        self._external_source.start()
+        self._external_source_running = True
+
+    def _stop_external_source_locked(self) -> None:
+        if self._external_source is None or not self._external_source_running:
+            return
+        self._external_source.stop()
+        self._external_source_running = False
+        if self._raw_frames is not None:
+            self._raw_frames.clear()
 
     def _on_pipeline_error(self, message: str) -> None:
         self.metrics.set("pipeline_last_error", message)

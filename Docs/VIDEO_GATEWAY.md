@@ -95,9 +95,17 @@ standalone CLI source: configure `SourceKind.RAW_APP_SRC`, construct
 frames to `gateway.raw_frame_queue`. The queue keeps only one frame and its
 `put()` call never waits for encoding or network delivery.
 
-The reference ROS 2/Insight9 implementation is in the parent workspace at
-`scripts/stream_ros_camera_to_vr.py`. It uses only this public API; it does not
-pretend to be a Unitree source or access private gateway attributes.
+Attached raw sources are demand-driven. `gateway.start()` leaves the source
+idle while the Unity control and health listeners remain available. An
+`OPEN_CAMERA` request starts the source before the encoding pipeline; a
+`CLOSE_CAMERA` request or control disconnect stops both and clears the pending
+raw frame. Direct-target mode opens the stream during gateway startup and
+therefore starts the source immediately.
+
+The reference ROS 2/Insight9 implementation lives with the robot application at
+`/home/phymi/Project/vla/LogosVLA/deployment/scripts/camera/stream_ros_camera_to_vr.py`.
+It uses only this public API; it does not pretend to be a Unitree source or
+access private gateway attributes.
 
 ## Optional Unitree WebRTC source (hardware pending)
 
@@ -212,6 +220,12 @@ queued GOP, asks the encoder for a new keyframe, drops frames while waiting,
 and resumes only when SPS, PPS, and IDR are available together. A network
 timeout or reconnect uses the same recovery boundary, so old video is not
 replayed after congestion.
+
+The transport also waits for that complete recovery access unit before opening
+the TCP connection. A slow camera, ROS discovery, or encoder startup therefore
+cannot occupy the PICO receiver with a connection that has no decodable video.
+The prepared recovery unit is sent immediately after connect, and every
+reconnect repeats the same IDR-first handoff.
 
 Useful tuning flags:
 

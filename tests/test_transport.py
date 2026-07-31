@@ -66,13 +66,16 @@ class VideoTransportTest(unittest.TestCase):
         )
         transport.start()
         transport.set_target(Destination("127.0.0.1", 12345))
-        self.assertTrue(_wait_for(lambda: connect_count >= 1))
+        time.sleep(0.03)
+        self.assertEqual(connect_count, 0)
 
         queue.put(AccessUnit(b"recovery-1", is_recovery_point=True))
-        self.assertTrue(_wait_for(lambda: connect_count >= 2))
+        self.assertTrue(_wait_for(lambda: connect_count >= 1))
+        self.assertTrue(_wait_for(lambda: first.closed))
 
         queue.put(AccessUnit(b"stale-p", is_recovery_point=False))
         queue.put(AccessUnit(b"recovery-2", is_recovery_point=True))
+        self.assertTrue(_wait_for(lambda: connect_count >= 2))
         self.assertTrue(_wait_for(lambda: len(second.sent) == 1))
         transport.stop()
 
