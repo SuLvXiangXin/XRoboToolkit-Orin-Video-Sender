@@ -1,6 +1,9 @@
 # XRoboToolkit-Orin-Video-Sender
 Video Previewer/Encoder/Sender on Nvidia Jetson Orin Platform
 
+Optional [generic mono video v1](Docs/generic-video.md) adds a NumPy frame API,
+runtime resolution negotiation and an independent PICO connection.
+
 ![Screenshot](Docs/screenshot.png)
 > Sender (Webcam): `./OrinVideoSender --preview --send --server 192.168.1.176 --port 12345`
 

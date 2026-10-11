@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xrobotoolkit-video-sender"
+version = "0.1.0"
+description = "Camera-independent, bounded-latency H.264 sender for PICO"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.scripts]
+xrobotoolkit-video-sender = "video_sender.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["video_sender"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
